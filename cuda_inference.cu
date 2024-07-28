@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdint>
+#include <cuda/std/limits>
 #include <iostream>
 
 #define CEIL(a, b) ((a + b - 1) / b)
@@ -18,16 +19,16 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
     }
 }
 
-__host__ __device__ inline uint64_t conv2dOutputSize(uint64_t x, uint64_t kernel_size,
-                                                     uint64_t stride, uint64_t padding)
+__host__ __device__ inline uint64_t convOutputSize(uint64_t x, uint64_t kernel_size,
+                                                   uint64_t stride, uint64_t padding)
 {
     return (2 * padding + x - kernel_size) / stride + 1;
 }
 
-__global__ void conv2d_kernel(float *weight, float *inp, float *out, uint64_t kernel_size,
-                              uint64_t stride, uint64_t padding, uint64_t h_out, uint64_t w_out,
-                              uint64_t B, uint64_t in_channels, uint64_t out_channels, uint64_t H,
-                              uint64_t W)
+__global__ void conv2dForwardKernel(float *inp, float *weight, float *out, uint64_t kernel_size,
+                                    uint64_t stride, uint64_t padding, uint64_t h_out,
+                                    uint64_t w_out, uint64_t B, uint64_t in_channels,
+                                    uint64_t out_channels, uint64_t H, uint64_t W)
 {
     const uint64_t thread_x = threadIdx.x + blockIdx.x * blockDim.x;
     const uint64_t x = thread_x % h_out;
@@ -60,6 +61,41 @@ __global__ void conv2d_kernel(float *weight, float *inp, float *out, uint64_t ke
         }
     }
     out[b * out_channels * w_out * h_out + out_channel * h_out * w_out + x * w_out + y] = sum;
+}
+
+__global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, uint64_t stride,
+                                uint64_t padding, uint64_t h_out, uint64_t w_out, uint64_t B,
+                                uint64_t channels, uint64_t H, uint64_t W)
+{
+    const uint64_t thread_x = threadIdx.x + blockIdx.x * blockDim.x;
+    const uint64_t x = thread_x % h_out;
+    const uint64_t y = threadIdx.y + blockIdx.y * blockDim.y;
+    const uint64_t channel = threadIdx.z + blockIdx.z * blockDim.z;
+    const uint64_t b = thread_x / h_out;
+    if (x >= h_out || y >= w_out || channel >= channels || b >= B) {
+        return;
+    }
+
+    const uint64_t x_out = x * stride;
+    const uint64_t y_out = y * stride;
+    for (uint64_t channel = 0; channel < channels; ++channel) {
+        float mx = cuda::std::numeric_limits<float>::min();
+        for (uint64_t i = 0; i < kernel_size; ++i) {
+            const uint64_t x_pad = x_out + i;
+            if (x_pad < padding || x_pad - padding >= H) {
+                continue;
+            }
+            for (uint64_t j = 0; j < kernel_size; ++j) {
+                const uint64_t y_pad = y_out + j;
+                if (y_pad < padding || y_pad - padding >= W) {
+                    continue;
+                }
+                mx = fmax(mx, inp[b * channels * H * W + channel * H * W + (x_pad - padding) * W +
+                                  y_pad - padding]);
+            }
+        }
+        out[b * channels * w_out * h_out + channel * h_out * w_out + x * w_out + y] = mx;
+    }
 }
 
 void *safeCudaMalloc(uint64_t size)
@@ -120,8 +156,8 @@ int main()
     cudaMemcpy(inp_cuda, inp, inp_numel * sizeof(float), cudaMemcpyHostToDevice);
     std::cout << "inp.numel() = " << inp_numel << "\n";
 
-    const uint64_t h_out = conv2dOutputSize(H, kernel_size, stride, padding),
-                   w_out = conv2dOutputSize(W, kernel_size, stride, padding);
+    const uint64_t h_out = convOutputSize(H, kernel_size, stride, padding),
+                   w_out = convOutputSize(W, kernel_size, stride, padding);
     std::cout << "h_out = " << h_out << " w_out = " << w_out << "\n";
     const uint64_t out_numel = B * out_channels * h_out * w_out;
     float *out_cuda = (float *)safeCudaMalloc(out_numel * sizeof(float));
@@ -131,9 +167,11 @@ int main()
     const auto block_size = dim3(16, 16, 4);
     const auto blocks = dim3(CEIL(B * h_out, block_size.x), CEIL(w_out, block_size.y),
                              CEIL(out_channels, block_size.z));
-    conv2d_kernel<<<blocks, block_size>>>(weight_cuda, inp_cuda, out_cuda, kernel_size, stride,
-                                          padding, h_out, w_out, B, in_channels, out_channels, H,
-                                          W);
+    conv2dForwardKernel<<<blocks, block_size>>>(inp_cuda, weight_cuda, out_cuda, kernel_size,
+                                                stride, padding, h_out, w_out, B, in_channels,
+                                                out_channels, H, W);
+    // maxPool2dKernel<<<blocks, block_size>>>(inp_cuda, out_cuda, kernel_size, stride, padding,
+    //                                          h_out, w_out, B, in_channels, H, W);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "Finished kernel\n";
