@@ -98,6 +98,23 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
     }
 }
 
+// (B, C) x (C, N) = (B, N)
+// N - number of neurons, C - number of features
+__global__ void linearForwardKernel(float *inp, float *weight, float *out, uint64_t N, uint64_t B,
+                                    uint64_t C)
+{
+    const uint64_t b = threadIdx.x + blockIdx.x * blockDim.x;
+    const uint64_t n = threadIdx.y + blockIdx.y * blockDim.y;
+    if (b >= B || n >= N) {
+        return;
+    }
+    float curr = 0;
+    for (uint64_t i = 0; i < C; ++i) {
+        curr += inp[b * C + i] * weight[i * N + n]; // inp[b][i] * weight[i][n]
+    }
+    out[b * N + n] = curr; // out[b][n]
+}
+
 void *safeCudaMalloc(uint64_t size)
 {
     void *dest;
@@ -105,10 +122,8 @@ void *safeCudaMalloc(uint64_t size)
     return dest;
 }
 
-int main()
+void conv2dTest()
 {
-    std::cout << "Started\n";
-
     const uint64_t B = 2;
     const uint64_t kernel_size = 2;
     const uint64_t in_channels = 1;
@@ -199,5 +214,79 @@ int main()
         std::cout << "\n";
     }
     printf("done\n");
+}
+
+void linearTest()
+{
+    const uint64_t B = 3;
+    const uint64_t C = 16, N = 8;
+
+    const uint64_t weight_numel = C * N;
+    float *weight_cuda = (float *)safeCudaMalloc(weight_numel * sizeof(float));
+    float *weight = (float *)malloc(weight_numel * sizeof(float));
+    for (uint64_t i = 0; i < weight_numel; ++i) {
+        weight[i] = i;
+    }
+    std::cout << "weight:\n";
+    for (uint64_t i = 0; i < C; ++i) {
+        for (uint64_t j = 0; j < N; ++j) {
+            std::cout << weight[i * N + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    cudaMemcpy(weight_cuda, weight, weight_numel * sizeof(float), cudaMemcpyHostToDevice);
+    std::cout << "weight.numel() = " << weight_numel << "\n";
+
+    const uint64_t inp_numel = B * C;
+    float *inp_cuda = (float *)safeCudaMalloc(inp_numel * sizeof(float));
+    float *inp = (float *)malloc(inp_numel * sizeof(float));
+    for (uint64_t i = 0; i < inp_numel; ++i) {
+        inp[i] = i;
+    }
+    std::cout << "inp:\n";
+    for (uint64_t b = 0; b < B; ++b) {
+        std::cout << "batch = " << b << ":\n";
+        for (uint64_t i = 0; i < C; ++i) {
+            std::cout << inp[b * C + i] << " ";
+        }
+        std::cout << "\n";
+    }
+    cudaMemcpy(inp_cuda, inp, inp_numel * sizeof(float), cudaMemcpyHostToDevice);
+    std::cout << "inp.numel() = " << inp_numel << "\n";
+
+    const uint64_t out_numel = B * N;
+    float *out_cuda = (float *)safeCudaMalloc(out_numel * sizeof(float));
+    float *out = (float *)malloc(out_numel * sizeof(float));
+    std::cout << "out.numel() = " << out_numel << "\n";
+
+    const auto block_size = dim3(16, 16);
+    const auto blocks = dim3(CEIL(B, block_size.x), CEIL(N, block_size.y));
+    linearForwardKernel<<<blocks, block_size>>>(inp_cuda, weight_cuda, out_cuda, N, B, C);
+    // maxPool2dKernel<<<blocks, block_size>>>(inp_cuda, out_cuda, kernel_size, stride, padding,
+    //                                          h_out, w_out, B, in_channels, H, W);
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    std::cout << "Finished kernel\n";
+
+    cudaMemcpy(out, out_cuda, out_numel * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+
+    std::cout << "out:\n";
+    for (uint64_t b = 0; b < B; ++b) {
+        std::cout << "batch = " << b << ":\n";
+        for (uint64_t j = 0; j < N; ++j) {
+            std::cout << out[b * N + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    printf("done\n");
+}
+
+int main()
+{
+    std::cout << "Started\n";
+    linearTest();
+
     return 0;
 }
