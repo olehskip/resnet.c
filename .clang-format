@@ -1,0 +1,18 @@
+IndentWidth: 4
+ColumnLimit: 100
+Language: Cpp
+PointerAlignment: Right
+AlignAfterOpenBracket: Align
+AlignEscapedNewlines: Left
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterStruct: true
+  AfterEnum: true
+  AfterFunction: true
+AllowShortFunctionsOnASingleLine: Empty
+InsertNewlineAtEOF: true
+IndentCaseLabels: true
+IndentAccessModifiers: false
+AccessModifierOffset: -4
