@@ -100,8 +100,8 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
 
 // (B, C) x (C, N) = (B, N)
 // N - number of neurons, C - number of features
-__global__ void linearForwardKernel(float *inp, float *weight, float *out, uint64_t N, uint64_t B,
-                                    uint64_t C)
+__global__ void linearForwardKernel(float *inp, float *weight, float *bias, float *out, uint64_t N,
+                                    uint64_t B, uint64_t C)
 {
     const uint64_t b = threadIdx.x + blockIdx.x * blockDim.x;
     const uint64_t n = threadIdx.y + blockIdx.y * blockDim.y;
@@ -112,7 +112,7 @@ __global__ void linearForwardKernel(float *inp, float *weight, float *out, uint6
     for (uint64_t i = 0; i < C; ++i) {
         curr += inp[b * C + i] * weight[i * N + n]; // inp[b][i] * weight[i][n]
     }
-    out[b * N + n] = curr; // out[b][n]
+    out[b * N + n] = curr + bias[n]; // out[b][n]
 }
 
 void *safeCudaMalloc(uint64_t size)
@@ -237,6 +237,18 @@ void linearTest()
     cudaMemcpy(weight_cuda, weight, weight_numel * sizeof(float), cudaMemcpyHostToDevice);
     std::cout << "weight.numel() = " << weight_numel << "\n";
 
+    float *bias_cuda = (float *)safeCudaMalloc(N * sizeof(float));
+    float *bias = (float *)malloc(N * sizeof(float));
+    for (uint64_t i = 0; i < N; ++i) {
+        bias[i] = i;
+    }
+    std::cout << "bias:\n";
+    for (uint64_t i = 0; i < N; ++i) {
+        std::cout << bias[i] << " ";
+    }
+    std::cout << "\n";
+    cudaMemcpy(bias_cuda, bias, N * sizeof(float), cudaMemcpyHostToDevice);
+
     const uint64_t inp_numel = B * C;
     float *inp_cuda = (float *)safeCudaMalloc(inp_numel * sizeof(float));
     float *inp = (float *)malloc(inp_numel * sizeof(float));
@@ -261,9 +273,8 @@ void linearTest()
 
     const auto block_size = dim3(16, 16);
     const auto blocks = dim3(CEIL(B, block_size.x), CEIL(N, block_size.y));
-    linearForwardKernel<<<blocks, block_size>>>(inp_cuda, weight_cuda, out_cuda, N, B, C);
-    // maxPool2dKernel<<<blocks, block_size>>>(inp_cuda, out_cuda, kernel_size, stride, padding,
-    //                                          h_out, w_out, B, in_channels, H, W);
+    linearForwardKernel<<<blocks, block_size>>>(inp_cuda, weight_cuda, bias_cuda, out_cuda, N, B,
+                                                C);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "Finished kernel\n";
