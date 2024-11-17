@@ -73,8 +73,6 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
     }
 }
 
-// (B, C) x (C, N) = (B, N)
-// N - number of neurons, C - number of features
 __global__ void linearForwardKernel(float *inp, float *weight, float *bias, float *out, uint64_t N,
                                     uint64_t B, uint64_t C)
 {
@@ -87,5 +85,29 @@ __global__ void linearForwardKernel(float *inp, float *weight, float *bias, floa
     for (uint64_t i = 0; i < C; ++i) {
         curr += inp[b * C + i] * weight[i * N + n]; // inp[b][i] * weight[i][n]
     }
-    out[b * N + n] = curr + bias[n]; // out[b][n]
+    if (bias) {
+        curr = bias[n];
+    }
+    out[b * N + n] = curr; // out[b][n]
+}
+
+__global__ void reluForwardKernel(float *inp, float *out, uint64_t N)
+{
+    const uint64_t n = threadIdx.x + blockIdx.x * blockDim.x;
+    if (n >= N) {
+        return;
+    }
+    out[n] = abs(inp[n]);
+}
+
+__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *mean, float *var,
+                                         uint64_t B, uint64_t C, uint64_t N)
+{
+    const uint64_t b = threadIdx.x + blockIdx.x * blockDim.x;
+    const uint64_t c = threadIdx.y + blockIdx.y * blockDim.y;
+    const uint64_t n = threadIdx.z + blockIdx.z * blockDim.z;
+    if (b >= B || c >= C || n >= N) {
+        return;
+    }
+    out[b* B + c * C + n] = (inp[b * B + c * C + n] - mean[b * B + c * C]) / sqrt(var[b * B + c * C] + 0.001);
 }

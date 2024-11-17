@@ -2,7 +2,6 @@
 #define CUDA_OPS_CUH
 
 #include <cassert>
-#include <cstdint>
 #include <cuda/std/limits>
 
 #include "helpers.cuh"
@@ -22,7 +21,12 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
                                 uint64_t channels, uint64_t H, uint64_t W);
 // (B, C) x (C, N) = (B, N)
 // N - number of neurons, C - number of features
+// adds bias if it's not NULL
 __global__ void linearForwardKernel(float *inp, float *weight, float *bias, float *out, uint64_t N,
                                     uint64_t B, uint64_t C);
+__global__ void reluForwardKernel(float *inp, float *out, uint64_t N);
+
+__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *mean, float *var,
+                                         uint64_t B, uint64_t C, uint64_t N);
 
 #endif // CUDA_OPS_CUH

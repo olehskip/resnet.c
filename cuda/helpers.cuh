@@ -2,6 +2,7 @@
 #define CUDA_HELPERS_CUH
 
 #include <iostream>
+#include <cstdint>
 #define CEIL(a, b) ((a + b - 1) / b)
 
 // source: https://stackoverflow.com/a/14038590

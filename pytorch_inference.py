@@ -2,10 +2,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+import struct
+from pathlib import Path
 
 DEVICE = "cuda"
 
-
+def load_tensor(file_path):
+    file_path = Path(file_path)
+    file_size = file_path.stat().st_size
+    num_floats = file_size // 4
+    
+    with open(file_path, "rb") as f:
+        data = []
+        for _ in range(num_floats):
+            float_data = struct.unpack('f', f.read(4))[0]
+            data.append(float_data)
+    
+    tensor = torch.tensor(data).to(DEVICE)
+    
+    return tensor
 class ResnetBlock(nn.Module):
     def __init__(
         self,
@@ -141,8 +156,11 @@ class Resnet152(nn.Module):
 
         return y
 
-
-a = torch.rand((16, 3, 224, 224)).to(DEVICE)
+B = 2
+C = 3
+H, W = 224, 224
+a = torch.arange(B * C * H * W).view(B, C, H, W).float().to(DEVICE)
+# a = torch.rand((16, 3, 224, 224)).to(DEVICE)
 resnet = Resnet152(1000).to(DEVICE)
 resnet2 = torchvision.models.resnet152(weights="IMAGENET1K_V1").to(DEVICE)
 resnet.load_state_dict(resnet2.state_dict())
