@@ -150,10 +150,29 @@ struct BatchNorm2d
     const uint64_t channels_num;
 };
 
+struct MaxPool2d
+{
+    MaxPool2d(uint64_t channels, uint64_t kernel_size, uint64_t stride, uint64_t padding)
+        : channels(channels), kernel_size(kernel_size), stride(stride), padding(padding)
+    {
+    }
+    const uint64_t channels, kernel_size, stride, padding;
+    uint64_t out_side_size(uint64_t side_size)
+    {
+        return convOutputSize(side_size, kernel_size, stride, padding);
+    }
+
+    uint64_t out_numel(uint64_t b, uint64_t h, uint64_t w)
+    {
+        return b * channels * out_side_size(h) * out_side_size(w);
+    }
+};
+
 struct ResnetModel
 {
     Conv2d conv1;
     BatchNorm2d bn1;
+    MaxPool2d maxpool;
 };
 
 ResnetModel createResnet152()
@@ -163,7 +182,8 @@ ResnetModel createResnet152()
                     .bn1 = BatchNorm2d(loadArrayToCuda<float>("weights_bin/bn1.weight"),
                                        loadArrayToCuda<float>("weights_bin/bn1.bias"),
                                        loadArrayToCuda<float>("weights_bin/bn1.running_mean"),
-                                       loadArrayToCuda<float>("weights_bin/bn1.running_var"), 64)};
+                                       loadArrayToCuda<float>("weights_bin/bn1.running_var"), 64),
+                    .maxpool = MaxPool2d(64, 3, 2, 1)};
 
     return ret;
 }
@@ -175,16 +195,17 @@ void resnet_152_forward(ResnetModel &model, FloatArray x, uint64_t B, uint64_t C
     assert(x.device == Device::GPU);
 
     const uint64_t conv1_out_numel = model.conv1.out_numel(B, H, W);
-    const auto w_out = model.conv1.out_side_size(W), h_out = model.conv1.out_side_size(H);
+    const auto conv1_w_out = model.conv1.out_side_size(W),
+               conv1_h_out = model.conv1.out_side_size(H);
     FloatArray conv1_out = FloatArray(conv1_out_numel, Device::GPU);
     const auto conv1_block_size = dim3(8, 8, 16);
     const auto conv1_blocks =
-        dim3(CEIL(B * w_out, conv1_block_size.x), CEIL(h_out, conv1_block_size.y),
+        dim3(CEIL(B * conv1_w_out, conv1_block_size.x), CEIL(conv1_h_out, conv1_block_size.y),
              CEIL(model.conv1.out_channels, conv1_block_size.z));
     conv2dForwardKernel<<<conv1_blocks, conv1_block_size>>>(
         x.data, model.conv1.weight.data, conv1_out.data, model.conv1.kernel_size,
-        model.conv1.stride, model.conv1.padding, h_out, w_out, B, model.conv1.in_channels,
-        model.conv1.out_channels, H, W);
+        model.conv1.stride, model.conv1.padding, conv1_h_out, conv1_w_out, B,
+        model.conv1.in_channels, model.conv1.out_channels, H, W);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "conv1 kernel done\n";
@@ -193,25 +214,42 @@ void resnet_152_forward(ResnetModel &model, FloatArray x, uint64_t B, uint64_t C
     const auto bn1_block_size = dim3(8, 8, 16);
     const auto bn1_blocks =
         dim3(CEIL(B, bn1_block_size.x), CEIL(model.bn1.channels_num, bn1_block_size.y),
-             CEIL(w_out * h_out, bn1_block_size.z));
+             CEIL(conv1_w_out * conv1_h_out, bn1_block_size.z));
     batchNorm2dForwardKernel<<<bn1_blocks, bn1_block_size>>>(
         conv1_out.data, bn1_out.data, model.bn1.weight.data, model.bn1.bias.data,
-        model.bn1.mean.data, model.bn1.var.data, B, model.bn1.channels_num, w_out * h_out);
+        model.bn1.mean.data, model.bn1.var.data, B, model.bn1.channels_num,
+        conv1_w_out * conv1_h_out);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "bn1 kernel done\n";
-    
+
     FloatArray relu_out = FloatArray(conv1_out_numel, Device::GPU);
     const auto relu_block_size = dim3(1024);
     const auto relu_blocks =
-        dim3(CEIL(B * model.bn1.channels_num * w_out * h_out, bn1_block_size.x));
+        dim3(CEIL(B * model.bn1.channels_num * conv1_w_out * conv1_h_out, bn1_block_size.x));
     reluForwardKernel<<<relu_blocks, relu_block_size>>>(
-        bn1_out.data, relu_out.data, B * model.bn1.channels_num * w_out * h_out);
+        bn1_out.data, relu_out.data, B * model.bn1.channels_num * conv1_w_out * conv1_h_out);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "relu kernel done\n";
 
-    FloatArray out = relu_out.copyTo(Device::CPU);
+    const uint64_t maxpool_out_numel = model.maxpool.out_numel(B, conv1_h_out, conv1_w_out);
+    const auto maxpool_w_out = model.maxpool.out_side_size(conv1_h_out),
+               maxpool_h_out = model.maxpool.out_side_size(conv1_w_out);
+    FloatArray maxpool_out = FloatArray(maxpool_out_numel, Device::GPU);
+    const auto maxpool_block_size = dim3(8, 8, 16);
+    const auto maxpool_blocks =
+        dim3(CEIL(B * conv1_w_out, maxpool_block_size.x), CEIL(conv1_h_out, maxpool_block_size.y),
+             CEIL(model.bn1.channels_num, maxpool_block_size.z));
+    maxPool2dKernel<<<maxpool_blocks, maxpool_block_size>>>(
+        relu_out.data, maxpool_out.data, model.maxpool.kernel_size, model.maxpool.stride,
+        model.maxpool.padding, maxpool_h_out, maxpool_w_out, B, model.bn1.channels_num, conv1_w_out,
+        conv1_h_out);
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    std::cout << "conv1 kernel done\n";
+
+    FloatArray out = maxpool_out.copyTo(Device::CPU);
     saveArray("cuda_out.bin", out);
 }
 
