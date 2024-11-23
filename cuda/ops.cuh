@@ -26,7 +26,8 @@ __global__ void linearForwardKernel(float *inp, float *weight, float *bias, floa
                                     uint64_t B, uint64_t C);
 __global__ void reluForwardKernel(float *inp, float *out, uint64_t N);
 
-__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *mean, float *var,
-                                         uint64_t B, uint64_t C, uint64_t N);
+__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, float *bias,
+                                         float *mean, float *var, uint64_t B, uint64_t C,
+                                         uint64_t N);
 
 #endif // CUDA_OPS_CUH

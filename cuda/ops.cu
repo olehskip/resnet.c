@@ -100,8 +100,9 @@ __global__ void reluForwardKernel(float *inp, float *out, uint64_t N)
     out[n] = abs(inp[n]);
 }
 
-__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *mean, float *var,
-                                         uint64_t B, uint64_t C, uint64_t N)
+__global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, float *bias,
+                                         float *mean, float *var, uint64_t B, uint64_t C,
+                                         uint64_t N)
 {
     const uint64_t b = threadIdx.x + blockIdx.x * blockDim.x;
     const uint64_t c = threadIdx.y + blockIdx.y * blockDim.y;
@@ -109,5 +110,6 @@ __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *mean, fl
     if (b >= B || c >= C || n >= N) {
         return;
     }
-    out[b* B + c * C + n] = (inp[b * B + c * C + n] - mean[b * B + c * C]) / sqrt(var[b * B + c * C] + 0.001);
+    out[b * C * N + c * N + n] =
+        (inp[b * C * N + c * N + n] - mean[c]) / sqrt(var[c] + 1e-5) * weight[c] + bias[c];
 }
