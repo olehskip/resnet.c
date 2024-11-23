@@ -188,8 +188,6 @@ void resnet_152_forward(ResnetModel &model, FloatArray x, uint64_t B, uint64_t C
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "conv1 kernel done\n";
-    FloatArray out0 = conv1_out.copyTo(Device::CPU);
-    saveArray("cuda_out0.bin", out0);
 
     FloatArray bn1_out = FloatArray(conv1_out_numel, Device::GPU);
     const auto bn1_block_size = dim3(8, 8, 16);
@@ -202,8 +200,18 @@ void resnet_152_forward(ResnetModel &model, FloatArray x, uint64_t B, uint64_t C
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
     std::cout << "bn1 kernel done\n";
+    
+    FloatArray relu_out = FloatArray(conv1_out_numel, Device::GPU);
+    const auto relu_block_size = dim3(1024);
+    const auto relu_blocks =
+        dim3(CEIL(B * model.bn1.channels_num * w_out * h_out, bn1_block_size.x));
+    reluForwardKernel<<<relu_blocks, relu_block_size>>>(
+        bn1_out.data, relu_out.data, B * model.bn1.channels_num * w_out * h_out);
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    std::cout << "relu kernel done\n";
 
-    FloatArray out = bn1_out.copyTo(Device::CPU);
+    FloatArray out = relu_out.copyTo(Device::CPU);
     saveArray("cuda_out.bin", out);
 }
 

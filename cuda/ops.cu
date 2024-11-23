@@ -97,7 +97,7 @@ __global__ void reluForwardKernel(float *inp, float *out, uint64_t N)
     if (n >= N) {
         return;
     }
-    out[n] = abs(inp[n]);
+    out[n] = fmax(inp[n], 0.f);
 }
 
 __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, float *bias,
