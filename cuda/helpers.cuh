@@ -15,8 +15,9 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
     if (code != cudaSuccess) {
         std::cerr << "GPUassert: " << cudaGetErrorString(code) << " " << file << " " << line
                   << "\n";
-        if (abort)
-            exit(code);
+        if (abort) {
+            std::abort();
+        }
     }
 }
 
@@ -24,6 +25,10 @@ inline void *safeCudaMalloc(uint64_t size)
 {
     void *dest;
     gpuErrchk(cudaMalloc(&dest, size));
+    static uint64_t total = 0;
+    total += size;
+    std::cerr << "GPU allocate ptr: " << dest << ". Size: " << size << " bytes. Total: " << total
+              << " bytes" << std::endl;
     return dest;
 }
 

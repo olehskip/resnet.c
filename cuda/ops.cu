@@ -1,6 +1,6 @@
 #include "ops.cuh"
 
-__global__ void conv2dForwardKernel(float *inp, float *weight, float *out, uint64_t kernel_size,
+__global__ void conv2dForwardKernel(float *inp, float *out, float *weight, uint64_t kernel_size,
                                     uint64_t stride, uint64_t padding, uint64_t h_out,
                                     uint64_t w_out, uint64_t B, uint64_t in_channels,
                                     uint64_t out_channels, uint64_t H, uint64_t W)
@@ -73,7 +73,7 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
     }
 }
 
-__global__ void linearForwardKernel(float *inp, float *weight, float *bias, float *out, uint64_t N,
+__global__ void linearForwardKernel(float *inp, float *out, float *weight, float *bias, uint64_t N,
                                     uint64_t B, uint64_t C)
 {
     const uint64_t b = threadIdx.x + blockIdx.x * blockDim.x;
@@ -112,4 +112,8 @@ __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, 
     }
     out[b * C * N + c * N + n] =
         (inp[b * C * N + c * N + n] - mean[c]) / sqrt(var[c] + 1e-5) * weight[c] + bias[c];
+    if (b == 0 && c == 0 && n == 0) {
+        printf("%f = (%f - %f) / (%f + 1e-5) * %f + %f\n", out[b * C * N + c * N + n],
+               inp[b * C * N + c * N + n], mean[c], var[c], weight[c], bias[c]);
+    }
 }
