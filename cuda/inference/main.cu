@@ -231,6 +231,7 @@ struct Conv2d
                                    uint64_t kernel_size, uint64_t stride = 1, uint64_t padding = 0)
     {
         auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight");
+        std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
         weight.reshape(Shape({out_channels, in_channels, kernel_size, kernel_size}));
         return Conv2d(std::move(weight), in_channels, out_channels, kernel_size, stride, padding);
     }
@@ -299,6 +300,90 @@ struct MaxPool2d
     }
 };
 
+struct Downsample
+{
+    Downsample(Conv2d &&conv, BatchNorm2d &&bn)
+        : conv(std::move(conv)), bn(std::move(bn)), act(FloatTensor(Device::GPU))
+    {
+    }
+    Conv2d conv;
+    BatchNorm2d bn;
+    FloatTensor act;
+};
+
+struct ResnetBlock
+{
+    ResnetBlock(Conv2d &&conv1, BatchNorm2d &&bn1, Conv2d &&conv2, BatchNorm2d &&bn2,
+                Conv2d &&conv3, BatchNorm2d &&bn3, std::optional<Downsample> downsample,
+                uint64_t in_channels, uint64_t inter_channels, uint64_t out_channels,
+                uint64_t stride)
+        : in_channels(in_channels), inter_channels(inter_channels), out_channels(out_channels),
+          stride(stride), conv1(std::move(conv1)), bn1(std::move(bn1)), conv2(std::move(conv2)),
+          bn2(std::move(bn2)), conv3(std::move(conv3)), bn3(std::move(bn3)),
+          act1_out(FloatTensor(Device::GPU)), act2_out(FloatTensor(Device::GPU)),
+          act3_out(FloatTensor(Device::GPU))
+    {
+    }
+    const uint64_t in_channels, inter_channels, out_channels, stride; // remove?
+
+    Conv2d conv1;
+    BatchNorm2d bn1;
+    FloatTensor act1_out;
+
+    Conv2d conv2;
+    BatchNorm2d bn2;
+    FloatTensor act2_out;
+
+    Conv2d conv3;
+    BatchNorm2d bn3;
+    FloatTensor act3_out;
+
+    std::optional<Downsample> downsample;
+};
+
+struct Layer
+{
+    std::vector<ResnetBlock> blocks;
+};
+
+Layer createLayer(uint64_t layer_id, uint64_t in_channels, uint64_t inter_channels,
+                  uint64_t out_channels, uint64_t n_blocks, uint64_t stride = 1)
+{
+    auto loadResnetBlock = [layer_id](uint64_t block_id, uint64_t in_channels,
+                                      uint64_t inter_channels, uint64_t out_channels,
+                                      uint64_t stride) -> ResnetBlock {
+        const std::string common_name =
+            "layer" + std::to_string(layer_id) + "." + std::to_string(block_id) + ".";
+        Conv2d conv1 =
+            Conv2d::loadWeightToCuda(common_name + "conv1", in_channels, inter_channels, 1);
+        BatchNorm2d bn1 = BatchNorm2d::loadWeightToCuda(common_name + "bn1", inter_channels);
+        Conv2d conv2 = Conv2d::loadWeightToCuda(common_name + "conv2", inter_channels,
+                                                inter_channels, 3, stride, 1);
+        BatchNorm2d bn2 = BatchNorm2d::loadWeightToCuda(common_name + "bn2", inter_channels);
+        Conv2d conv3 =
+            Conv2d::loadWeightToCuda(common_name + "conv3", inter_channels, out_channels, 1);
+        BatchNorm2d bn3 = BatchNorm2d::loadWeightToCuda(common_name + "bn3", out_channels);
+        std::optional<Downsample> downsample = {};
+        if (stride != 1 || in_channels != out_channels) {
+            downsample.emplace(Downsample(
+                Conv2d::loadWeightToCuda(common_name + "downsample.0", in_channels, out_channels, 1,
+                                         stride),
+                BatchNorm2d::loadWeightToCuda(common_name + "downsample.1", out_channels)));
+        }
+        return ResnetBlock(std::move(conv1), std::move(bn1), std::move(conv2), std::move(bn2),
+                           std::move(conv3), std::move(bn3), std::move(downsample), in_channels,
+                           inter_channels, out_channels, stride);
+    };
+    std::vector<ResnetBlock> blocks;
+    blocks.emplace_back(loadResnetBlock(0, in_channels, inter_channels, out_channels, stride));
+    // for (uint64_t i = 1; i < n_blocks; ++i) {
+    //     blocks.emplace_back(loadResnetBlock(i, out_channels, inter_channels, out_channels, 1));
+    // }
+    return Layer{
+        .blocks = std::move(blocks),
+    };
+}
+
 struct ResnetModel
 {
     Conv2d conv1;
@@ -307,6 +392,8 @@ struct ResnetModel
 
     MaxPool2d maxpool;
     FloatTensor maxpool_out;
+
+    Layer layer1, layer2, layer3, layer4;
 };
 
 ResnetModel createResnet152()
@@ -315,8 +402,95 @@ ResnetModel createResnet152()
                     .bn1 = BatchNorm2d::loadWeightToCuda("bn1", 64),
                     .act1_out = FloatTensor(Device::GPU),
                     .maxpool = MaxPool2d(64, 3, 2, 1),
-                    .maxpool_out = FloatTensor(Device::GPU)};
+                    .maxpool_out = FloatTensor(Device::GPU),
+                    .layer1 = createLayer(1, 64, 64, 256, 3),
+                    .layer2 = createLayer(2, 256, 128, 512, 8, 2),
+                    .layer3 = createLayer(3, 512, 256, 1024, 36, 2),
+                    .layer4 = createLayer(4, 1024, 512, 2048, 3, 2)};
     return ret;
+}
+
+void layerForward(Layer &layer, FloatTensor &x)
+{
+    const uint64_t B = x.shape.at(0);
+    FloatTensor *y = &x;
+    auto convForward = [](Conv2d &conv, FloatTensor &x, FloatTensor &act_out) {
+        const auto [B, C, H, W] = x.shape.as_tuple<4>();
+        const Shape conv_out_shape = conv.getOutShape(x.shape);
+        const auto [h, w, conv_h_out, conv_w_out] = conv_out_shape.as_tuple<4>();
+        if (!act_out) {
+            act_out = FloatTensor(conv_out_shape, Device::GPU);
+        }
+
+        const auto conv_block_size = dim3(8, 8, 16);
+        const auto conv_blocks =
+            dim3(CEIL(B * conv_h_out, conv_block_size.x), CEIL(conv_w_out, conv_block_size.y),
+                 CEIL(conv.out_channels, conv_block_size.z));
+        conv2dForwardKernel<<<conv_blocks, conv_block_size>>>(
+            x.data, act_out.data, conv.weight.data, conv.kernel_size, conv.stride, conv.padding,
+            conv_h_out, conv_w_out, B, conv.in_channels, conv.out_channels, H, W);
+        cudaDeviceSynchronize();
+        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    };
+    auto bnForward = [](BatchNorm2d &bn, FloatTensor &x) {
+        const auto [B, C, conv_w_out, conv_h_out] = x.shape.as_tuple<4>();
+        const auto bn_block_size = dim3(8, 8, 16);
+        const auto bn_blocks =
+            dim3(CEIL(B, bn_block_size.x), CEIL(bn.channels_num, bn_block_size.y),
+                 CEIL(conv_w_out * conv_h_out, bn_block_size.z));
+        batchNorm2dForwardKernel<<<bn_blocks, bn_block_size>>>(
+            x.data, x.data, bn.weight.data, bn.bias.data, bn.mean.data, bn.var.data, B,
+            bn.channels_num, conv_w_out * conv_h_out);
+        cudaDeviceSynchronize();
+        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    };
+    auto reluForward = [](FloatTensor &x) {
+        const auto relu_block_size = dim3(1024);
+        const auto relu_blocks = dim3(CEIL(x.numel(), relu_block_size.x));
+        reluForwardKernel<<<relu_blocks, relu_block_size>>>(x.data, x.data, x.numel());
+        cudaDeviceSynchronize();
+        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    };
+    std::cout << "\n-------------\n";
+    for (auto &block : layer.blocks) {
+        std::cout << "new block" << std::endl;
+        // if (block.downsample) {
+        //     convForward(block.downsample->conv, x, block.downsample->act);
+        //     bnForward(block.downsample->bn, x);
+        // }
+
+        convForward(block.conv1, *y, block.act1_out);
+        block.act1_out.copyTo(Device::CPU).save("act1_out.bin");
+        block.conv1.weight.copyTo(Device::CPU).save("weight.bin");
+        x.copyTo(Device::CPU).save("x.bin");
+        std::cout << "Saved output" << std::endl;
+        break;
+        // std::cout << "conv1 finished" << std::endl;
+        // std::cout << "act1_out.shape = " << block.act1_out.shape << std::endl;
+        bnForward(block.bn1, block.act1_out);
+        reluForward(block.act1_out);
+
+        convForward(block.conv2, block.act1_out, block.act2_out);
+        bnForward(block.bn2, block.act2_out);
+        reluForward(block.act2_out);
+        // std::cout << "conv2 finished" << std::endl;
+        // std::cout << "act2_out.shape = " << block.act2_out.shape << std::endl;
+
+        convForward(block.conv3, block.act2_out, block.act3_out);
+        bnForward(block.bn3, block.act3_out);
+        // if (block.downsample) {
+        //     assert(block.act1_out.shape == block.downsample->act.shape);
+        //     const auto add_block_size = dim3(1024);
+        //     const auto add_blocks = dim3(CEIL(block.act3_out.numel(), add_block_size.x));
+        //     addForwardKernel<<<add_blocks, add_block_size>>>(
+        //         block.act3_out.data, block.downsample->act.data, block.act3_out.data,
+        //         block.act3_out.numel());
+        // }
+        reluForward(block.act3_out);
+        // std::cout << "conv3 finished" << std::endl;
+        // std::cout << "act3_out.shape = " << block.act3_out.shape << std::endl << std::endl;
+        y = &block.act3_out;
+    }
 }
 
 void resnet152Forward(ResnetModel &model, FloatTensor &x)
@@ -357,8 +531,7 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
     std::cout << "bn1 kernel done\n";
 
     const auto relu_block_size = dim3(1024);
-    const auto relu_blocks =
-        dim3(CEIL(B * model.bn1.channels_num * conv1_w_out * conv1_h_out, bn1_block_size.x));
+    const auto relu_blocks = dim3(CEIL(model.act1_out.numel(), relu_block_size.x));
     reluForwardKernel<<<relu_blocks, relu_block_size>>>(model.act1_out.data, model.act1_out.data,
                                                         B * model.bn1.channels_num * conv1_w_out *
                                                             conv1_h_out);
@@ -398,15 +571,26 @@ int main()
     // conv2dTest();
     // reluTest();
 
-    ResnetModel resnet_model = createResnet152();
-    std::cout << "created model\n";
+    // ResnetModel resnet_model = createResnet152();
+    // std::cout << "created model\n";
+    // 
+    // FloatTensor inp(Shape({B, resnet_model.conv1.in_channels, W, H}), Device::CPU);
+    // for (uint64_t i = 0; i < inp.numel(); ++i) {
+    //     inp.data[i] = i;
+    // }
+    // FloatTensor inp_cuda = inp.cuda();
+    // resnet152Forward(resnet_model, inp_cuda);
 
-    FloatTensor inp(Shape({B, resnet_model.conv1.in_channels, W, H}), Device::CPU);
+    Layer layer1 = createLayer(1, 64, 64, 256, 3);
+    FloatTensor inp(Shape({2, 64, 56, 56}), Device::CPU);
     for (uint64_t i = 0; i < inp.numel(); ++i) {
-        inp.data[i] = i;
+        inp.data[i] = i / 64. - (56 * 56);
     }
     FloatTensor inp_cuda = inp.cuda();
-    resnet152Forward(resnet_model, inp_cuda);
+    layerForward(layer1, inp_cuda);
+    // FloatTensor out = layer1.blocks.back().act3_out.copyTo(Device::CPU);
+    // out.save("cuda_out.bin");
+    // std::cout << "Saved output" << std::endl;
 
     return 0;
 }
