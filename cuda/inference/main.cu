@@ -60,6 +60,11 @@ struct Tensor
         data = NULL;
     }
 
+    Tensor(T *data, Shape shape, Device device = Device::CPU)
+        : data(data), shape(std::move(shape)), device(device)
+    {
+    }
+
     Tensor(Device device) : device(device)
     {
         shape = Shape({0});
@@ -146,11 +151,11 @@ struct Tensor
         file.close();
     }
 
-    void reshape(Shape new_shape)
+    Tensor<T> reshape(Shape new_shape)
     {
         assert(new_shape.size() != 0);
         assert(shape.numel() == new_shape.numel());
-        shape = new_shape;
+        return Tensor<T>(data, new_shape, device);
     }
 
     uint64_t numel() const
@@ -231,9 +236,9 @@ struct Conv2d
     static Conv2d loadWeightToCuda(std::string name, uint64_t in_channels, uint64_t out_channels,
                                    uint64_t kernel_size, uint64_t stride = 1, uint64_t padding = 0)
     {
-        auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight");
+        auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight")
+                          .reshape(Shape({out_channels, in_channels, kernel_size, kernel_size}));
         std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
-        weight.reshape(Shape({out_channels, in_channels, kernel_size, kernel_size}));
         return Conv2d(std::move(weight), in_channels, out_channels, kernel_size, stride, padding);
     }
 
@@ -279,9 +284,9 @@ struct BatchNorm2d
     const uint64_t channels_num;
 };
 
-struct MaxPool2d
+struct Pool2d
 {
-    MaxPool2d(uint64_t channels, uint64_t kernel_size, uint64_t stride = 1, uint64_t padding = 0)
+    Pool2d(uint64_t channels, uint64_t kernel_size, uint64_t stride = 1, uint64_t padding = 0)
         : channels(channels), kernel_size(kernel_size), stride(stride), padding(padding)
     {
     }
@@ -298,6 +303,38 @@ struct MaxPool2d
         return Shape({x_shape[0], channels,
                       convOutputSize(x_shape[2], kernel_size, stride, padding),
                       convOutputSize(x_shape[3], kernel_size, stride, padding)});
+    }
+};
+
+struct Linear
+{
+    Linear(FloatTensor weight, FloatTensor bias, uint64_t in_features, uint64_t out_features)
+        : weight(std::move(weight)), bias(std::move(bias)), in_features(in_features),
+          out_features(out_features)
+    {
+        assert(this->weight.shape == Shape({in_features, out_features}));
+        assert(this->bias.shape == Shape({out_features}));
+    }
+
+    static Linear loadWeightToCuda(std::string name, uint64_t in_features, uint64_t out_features)
+    {
+        auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight")
+                          .reshape(Shape({in_features, out_features}));
+        std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
+        auto bias =
+            FloatTensor::loadToCuda("weights_bin/" + name + ".bias").reshape(Shape({out_features}));
+        std::cout << "load " << "weights_bin/" + name + ".bias" << "\n";
+        return Linear(std::move(weight), std::move(bias), in_features, out_features);
+    }
+
+    FloatTensor weight, bias;
+    const uint64_t in_features, out_features;
+
+    Shape getOutShape(Shape x_shape)
+    {
+        assert(x_shape.size() == 2);
+        assert(x_shape[1] == in_features);
+        return Shape({x_shape.at(0), out_features});
     }
 };
 
@@ -391,23 +428,35 @@ struct ResnetModel
     BatchNorm2d bn1;
     FloatTensor act1_out;
 
-    MaxPool2d maxpool;
+    Pool2d maxpool;
     FloatTensor maxpool_out;
 
     Layer layer1, layer2, layer3, layer4;
+
+    Pool2d avgpool;
+    FloatTensor avgpool_out;
+
+    Linear fc;
+    FloatTensor fc_out;
 };
 
 ResnetModel createResnet152()
 {
-    ResnetModel ret{.conv1 = Conv2d::loadWeightToCuda("conv1", 3, 64, 7, 2, 3),
-                    .bn1 = BatchNorm2d::loadWeightToCuda("bn1", 64),
-                    .act1_out = FloatTensor(Device::GPU),
-                    .maxpool = MaxPool2d(64, 3, 2, 1),
-                    .maxpool_out = FloatTensor(Device::GPU),
-                    .layer1 = createLayer(1, 64, 64, 256, 3),
-                    .layer2 = createLayer(2, 256, 128, 512, 8, 2),
-                    .layer3 = createLayer(3, 512, 256, 1024, 36, 2),
-                    .layer4 = createLayer(4, 1024, 512, 2048, 3, 2)};
+    ResnetModel ret{
+        .conv1 = Conv2d::loadWeightToCuda("conv1", 3, 64, 7, 2, 3),
+        .bn1 = BatchNorm2d::loadWeightToCuda("bn1", 64),
+        .act1_out = FloatTensor(Device::GPU),
+        .maxpool = Pool2d(64, 3, 2, 1),
+        .maxpool_out = FloatTensor(Device::GPU),
+        .layer1 = createLayer(1, 64, 64, 256, 3),
+        .layer2 = createLayer(2, 256, 128, 512, 8, 2),
+        .layer3 = createLayer(3, 512, 256, 1024, 36, 2),
+        .layer4 = createLayer(4, 1024, 512, 2048, 3, 2),
+        .avgpool = Pool2d(2048, 7),
+        .avgpool_out = FloatTensor(Device::GPU),
+        .fc = Linear::loadWeightToCuda("fc", 2048, 1000),
+        .fc_out = FloatTensor(Device::GPU)
+    };
     return ret;
 }
 
@@ -543,16 +592,59 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
         model.bn1.channels_num, conv1_w_out, conv1_h_out);
     cudaDeviceSynchronize();
     gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
-    std::cout << "maxpool1 kernel done\n";
+    std::cout << "maxpool kernel done\n";
 
     layerForward(model.layer1, model.maxpool_out);
+    std::cout << "layer1 finished\n";
     layerForward(model.layer2, model.layer1.blocks.back().act3_out);
+    std::cout << "layer2 finished\n";
     layerForward(model.layer3, model.layer2.blocks.back().act3_out);
+    std::cout << "layer3 finished\n";
     layerForward(model.layer4, model.layer3.blocks.back().act3_out);
+    std::cout << "layer4 finished\n";
 
-    FloatTensor out = model.layer4.blocks.back().act3_out.copyTo(Device::CPU);
+    FloatTensor &last_layer_out = model.layer4.blocks.back().act3_out;
+    const Shape avgpool_out_shape = model.avgpool.getOutShape(last_layer_out.shape);
+    if (!model.avgpool_out) {
+        model.avgpool_out = FloatTensor(avgpool_out_shape, Device::GPU);
+    }
+    std::cout << "model.avgpool_out.shape = " << model.avgpool_out.shape << std::endl;
+    const auto avgpool_h_out = avgpool_out_shape.at(2), avgpool_w_out = avgpool_out_shape.at(3);
+    const auto avgpool_block_size = dim3(8, 8, 16);
+    const auto avgpool_blocks =
+        dim3(CEIL(last_layer_out.shape.at(0) * last_layer_out.shape.at(1), avgpool_block_size.x),
+             CEIL(last_layer_out.shape.at(2), avgpool_block_size.y),
+             CEIL(last_layer_out.shape.at(3), avgpool_block_size.z));
+    avgPool2dKernel<<<avgpool_blocks, avgpool_block_size>>>(
+        last_layer_out.data, model.avgpool_out.data, model.avgpool.kernel_size,
+        model.avgpool.stride, model.avgpool.padding, avgpool_h_out, avgpool_w_out, B,
+        last_layer_out.shape.at(1), last_layer_out.shape.at(2), last_layer_out.shape.at(3));
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    std::cout << "avgpool kernel done\n";
+
+    FloatTensor avgpool_out_flatten = model.avgpool_out.reshape(
+        Shape({model.avgpool_out.shape.at(0), model.avgpool_out.shape.at(1) *
+                                                  model.avgpool_out.shape.at(2) *
+                                                  model.avgpool_out.shape.at(3)}));
+    if (!model.fc_out) {
+        model.fc_out = FloatTensor(Shape({avgpool_out_flatten.shape.at(0), model.fc.out_features}),
+                                   Device::GPU);
+    }
+    const auto linear_block_size = dim3(16, 16);
+    const auto linear_blocks = dim3(CEIL(avgpool_out_flatten.shape.at(0), linear_block_size.x),
+                                    CEIL(avgpool_out_flatten.shape.at(1), linear_block_size.y));
+    linearForwardKernel<<<linear_blocks, linear_block_size>>>(
+        avgpool_out_flatten.data, model.fc_out.data, model.fc.weight.data, model.fc.bias.data,
+        model.fc.in_features, avgpool_out_flatten.shape.at(0), model.fc.out_features);
+    cudaDeviceSynchronize();
+    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    std::cout << "Finished kernel\n";
+    
+
+    FloatTensor out = model.fc_out.copyTo(Device::CPU);
     out.save("cuda_out.bin");
-    std::cout << "Saved output" << std::endl;
+    std::cout << "Saved output with shape = " << model.fc_out.shape << std::endl;
 }
 
 int main()
@@ -565,7 +657,7 @@ int main()
 
     ResnetModel resnet_model = createResnet152();
     std::cout << "created model\n";
-    
+
     FloatTensor inp(Shape({B, resnet_model.conv1.in_channels, W, H}), Device::CPU);
     for (uint64_t i = 0; i < inp.numel(); ++i) {
         inp.data[i] = i;

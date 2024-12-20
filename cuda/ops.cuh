@@ -19,6 +19,9 @@ __global__ void conv2dForwardKernel(float *inp, float *out, float *weight, uint6
 __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, uint64_t stride,
                                 uint64_t padding, uint64_t h_out, uint64_t w_out, uint64_t B,
                                 uint64_t channels, uint64_t H, uint64_t W);
+__global__ void avgPool2dKernel(float *inp, float *out, uint64_t kernel_size, uint64_t stride,
+                                uint64_t padding, uint64_t h_out, uint64_t w_out, uint64_t B,
+                                uint64_t channels, uint64_t H, uint64_t W);
 // (B, C) x (C, N) = (B, N)
 // N - number of neurons, C - number of features
 // adds bias if it's not NULL
