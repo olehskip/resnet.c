@@ -6,7 +6,7 @@ ${INFERENCE_BIN}: cuda/inference/main.cu cuda/ops.cu
 	$(NVCC) -I./cuda $^ -o $@ -std=c++20
 
 ${INFERENCE_BIN_DEBUG}: cuda/inference/main.cu cuda/ops.cu
-	$(NVCC) -I./cuda -g -O0 $^ -o $@ -std=c++20
+	$(NVCC) -I./cuda -g -O0 $^ -o $@ -std=c++20 -DDEBUG
 
 
 clean:

@@ -112,8 +112,13 @@ __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, 
     }
     out[b * C * N + c * N + n] =
         (inp[b * C * N + c * N + n] - mean[c]) / sqrt(var[c] + 1e-5) * weight[c] + bias[c];
-    if (b == 0 && c == 0 && n == 0) {
-        printf("%f = (%f - %f) / (%f + 1e-5) * %f + %f\n", out[b * C * N + c * N + n],
-               inp[b * C * N + c * N + n], mean[c], var[c], weight[c], bias[c]);
+}
+
+__global__ void addForwardKernel(float *inp1, float *inp2, float *out, uint64_t N)
+{
+    const uint64_t n = threadIdx.x + blockIdx.x * blockDim.x;
+    if (n >= N) {
+        return;
     }
+    out[n] = inp1[n] + inp2[n];
 }

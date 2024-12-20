@@ -29,5 +29,6 @@ __global__ void reluForwardKernel(float *inp, float *out, uint64_t N);
 __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, float *bias,
                                          float *mean, float *var, uint64_t B, uint64_t C,
                                          uint64_t N);
+__global__ void addForwardKernel(float *inp1, float *inp2, float *out, uint64_t N);
 
 #endif // CUDA_OPS_CUH
