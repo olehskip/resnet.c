@@ -1,9 +1,9 @@
 #ifndef CUDA_NN_CUH
 #define CUDA_NN_CUH
 
-#include "tensor.cuh"
 #include "helpers.cuh"
 #include "ops.cuh"
+#include "tensor.cuh"
 
 class Conv2d
 {
@@ -19,7 +19,7 @@ public:
                                    uint64_t kernel_size, uint64_t stride = 1, uint64_t padding = 0)
     {
         auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight")
-                          .reshape(Shape({out_channels, in_channels, kernel_size, kernel_size}));
+                          .view(Shape({out_channels, in_channels, kernel_size, kernel_size}));
         // std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
         return Conv2d(std::move(weight), in_channels, out_channels, kernel_size, stride, padding);
     }
@@ -47,10 +47,10 @@ public:
         : weight(std::move(weight)), bias(std::move(bias)), mean(std::move(mean)),
           var(std::move(var)), channels_num(channels_num)
     {
-        assert(this->weight.shape == Shape({channels_num}));
-        assert(this->bias.shape == Shape({channels_num}));
-        assert(this->mean.shape == Shape({channels_num}));
-        assert(this->var.shape == Shape({channels_num}));
+        assert(this->weight.shape() == Shape({channels_num}));
+        assert(this->bias.shape() == Shape({channels_num}));
+        assert(this->mean.shape() == Shape({channels_num}));
+        assert(this->var.shape() == Shape({channels_num}));
     }
 
     static BatchNorm2d loadWeightToCuda(std::string name, uint64_t channels_num)
@@ -67,7 +67,7 @@ public:
     FloatTensor mean;
     FloatTensor var;
     const uint64_t channels_num;
-    
+
     void forward(FloatTensor &x, FloatTensor &out);
 };
 
@@ -104,17 +104,17 @@ public:
         : weight(std::move(weight)), bias(std::move(bias)), in_features(in_features),
           out_features(out_features)
     {
-        assert(this->weight.shape == Shape({out_features, in_features}));
-        assert(this->bias.shape == Shape({out_features}));
+        assert(this->weight.shape() == Shape({out_features, in_features}));
+        assert(this->bias.shape() == Shape({out_features}));
     }
 
     static Linear loadWeightToCuda(std::string name, uint64_t in_features, uint64_t out_features)
     {
         auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight")
-                          .reshape(Shape({out_features, in_features}));
+                          .view(Shape({out_features, in_features}));
         // std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
         auto bias =
-            FloatTensor::loadToCuda("weights_bin/" + name + ".bias").reshape(Shape({out_features}));
+            FloatTensor::loadToCuda("weights_bin/" + name + ".bias").view(Shape({out_features}));
         // std::cout << "load " << "weights_bin/" + name + ".bias" << "\n";
         return Linear(std::move(weight), std::move(bias), in_features, out_features);
     }
@@ -128,8 +128,10 @@ public:
         assert(x_shape[1] == in_features);
         return Shape({x_shape.at(0), out_features});
     }
-    
+
     void forward(FloatTensor &x, FloatTensor &out);
 };
+
+void reluForward(FloatTensor &x, FloatTensor &out);
 
 #endif // CUDA_NN_CUH

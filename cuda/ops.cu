@@ -129,7 +129,7 @@ __global__ void linearForwardKernel(float *inp, float *out, float *weight, float
 
 __global__ void reluForwardKernel(float *inp, float *out, uint64_t N)
 {
-    const uint64_t n = threadIdx.x + blockIdx.x * blockDim.x;
+    const uint64_t n = blockIdx.x;
     if (n >= N) {
         return;
     }

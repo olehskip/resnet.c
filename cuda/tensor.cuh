@@ -1,13 +1,14 @@
 #ifndef CUDA_TENSOR_CUH
 #define CUDA_TENSOR_CUH
 
-#include <numeric>
-#include <vector>
+#include <cassert>
+#include <cstdint>
+#include <cuda_runtime.h>
 #include <fstream>
 #include <iomanip>
-#include <cstdint>
-#include <cassert>
-#include <cuda_runtime.h>
+#include <memory>
+#include <numeric>
+#include <vector>
 
 #include "helpers.cuh"
 
@@ -41,12 +42,12 @@ public:
         }(std::make_index_sequence<N>{});
     }
 
-    friend std::ostream &operator<<(std::ostream &os, const Shape &shape)
+    friend std::ostream &operator<<(std::ostream &os, const Shape &shape_)
     {
         os << "(";
-        for (size_t i = 0; i < shape.size(); ++i) {
-            os << shape[i];
-            if (i < shape.size() - 1) {
+        for (size_t i = 0; i < shape_.size(); ++i) {
+            os << shape_[i];
+            if (i < shape_.size() - 1) {
                 os << ", ";
             }
         }
@@ -58,82 +59,71 @@ public:
 template <class T>
 struct Tensor
 {
-    Tensor() : device(Device::CPU)
-    {
-        shape = Shape({0});
-        data = NULL;
-    }
-
-    Tensor(T *data, Shape shape, Device device = Device::CPU)
-        : data(data), shape(std::move(shape)), device(device)
-    {
-    }
-
     Tensor(Device device) : device(device)
     {
-        shape = Shape({0});
-        data = NULL;
+        shape_ = Shape({0});
     }
 
-    Tensor(Shape shape, Device device = Device::CPU) : shape(std::move(shape)), device(device)
+    Tensor(Shape shape_, Device device = Device::CPU) : shape_(std::move(shape_)), device(device)
     {
-        assert(this->shape.size() != 0);
+        assert(this->shape_.size() != 0);
         if (numel() != 0) {
             switch (device) {
                 case Device::CPU: {
-                    data = (T *)malloc(size());
+                    data_smart = std::shared_ptr<T>((T *)malloc(size()), [](T *ptr) {
+                        if (ptr) {
+                            free(ptr);
+                        }
+                    });
                     break;
                 }
                 case Device::GPU: {
-                    data = (T *)safeCudaMalloc(size());
+                    data_smart = std::shared_ptr<T>((T *)safeCudaMalloc(size()), [](T *ptr) {
+                        if (ptr) {
+                            cudaFree(ptr);
+                            cudaDeviceSynchronize();
+                        }
+                    });
+                    cudaDeviceSynchronize();
                     break;
                 }
                 default:
                     assert("not implemented");
             }
-        } else {
-            data = NULL;
         }
     }
 
-    Tensor(Tensor<T> &&another) : shape(another.shape), device(another.device)
+    Tensor(Tensor<T> &&another) : shape_(another.shape_), device(another.device)
     {
         assert(device == another.device);
-        data = another.data;
-        shape = std::move(another.shape);
-        assert(shape.size() != 0);
-        another.data = NULL;
-        another.shape = Shape({0});
+        data_smart = another.data_smart;
+        shape_ = std::move(another.shape_);
+        assert(shape_.size() != 0);
     }
 
-    ~Tensor()
+    static Tensor<T> arange_cpu(Shape shape_)
     {
-        clear();
-    }
-
-    static Tensor<T> arange_cpu(Shape shape)
-    {
-        Tensor<T> tensor(shape, Device::CPU);
-        const uint64_t end = shape.numel();
-        for(uint64_t i = 0; i < end; ++i) {
-            tensor.data[i] = i;
+        Tensor<T> tensor(shape_, Device::CPU);
+        const uint64_t end = shape_.numel();
+        for (uint64_t i = 0; i < end; ++i) {
+            tensor.data_smart[i] = i;
         }
 
         return tensor;
     }
 
-    static Tensor<T> ones_cpu(Shape shape)
+    static Tensor<T> ones_cpu(Shape shape_)
     {
-        Tensor<T> tensor(shape, Device::CPU);
-        const uint64_t end = shape.numel();
-        for(uint64_t i = 0; i < end; ++i) {
-            tensor.data[i] = 1;
+        Tensor<T> tensor(shape_, Device::CPU);
+        const uint64_t end = shape_.numel();
+        for (uint64_t i = 0; i < end; ++i) {
+            tensor.data_smart[i] = 1;
         }
 
         return tensor;
     }
 
-    static Tensor<T> load(std::string file_name)
+    static Tensor<T> loadToCpu(std::string file_name)
     {
         std::ifstream file(file_name, std::ios::binary);
         if (!file.is_open()) {
@@ -150,7 +140,7 @@ struct Tensor
 
         const auto abc = Shape({n});
         Tensor<T> out(Shape({n}), Device::CPU);
-        file.read(reinterpret_cast<char *>(out.data), file_size);
+        file.read(reinterpret_cast<char *>(out.data_smart.get()), file_size);
         assert(!file.fail());
         file.close();
         return out;
@@ -158,7 +148,7 @@ struct Tensor
 
     static Tensor<T> loadToCuda(std::string file_name)
     {
-        return Tensor<T>::load(file_name).cuda();
+        return Tensor<T>::loadToCpu(file_name).cuda();
     }
 
     void save(std::string file_name)
@@ -167,21 +157,21 @@ struct Tensor
         std::ofstream file(file_name, std::ios::binary);
         assert(file.is_open());
 
-        file.write(reinterpret_cast<char *>(data), size());
+        file.write(reinterpret_cast<char *>(data_smart.get()), size());
         assert(!file.fail());
         file.close();
     }
 
-    Tensor<T> reshape(Shape new_shape)
+    Tensor<T> view(Shape new_shape)
     {
         assert(new_shape.size() != 0);
-        assert(shape.numel() == new_shape.numel());
-        return Tensor<T>(data, new_shape, device);
+        assert(shape_.numel() == new_shape.numel());
+        return Tensor<T>(data_smart, new_shape, device);
     }
 
     uint64_t numel() const
     {
-        return shape.numel();
+        return shape_.numel();
     }
 
     uint64_t size()
@@ -189,20 +179,22 @@ struct Tensor
         return numel() * sizeof(T);
     }
 
-    Shape shape;
-    T *data;
     const Device device = Device::CPU;
 
     Tensor<T> toDevice(Device new_device)
     {
-        Tensor<T> ret(shape, new_device);
+        cudaDeviceSynchronize();
+        Tensor<T> ret(shape_, new_device);
         if (device == Device::CPU && new_device == Device::GPU) {
-            cudaMemcpy(ret.data, data, size(), cudaMemcpyHostToDevice);
+            cudaMemcpy(ret.data_smart.get(), data_smart.get(), size(), cudaMemcpyHostToDevice);
         } else if (device == Device::GPU && new_device == Device::CPU) {
-            cudaMemcpy(ret.data, data, size(), cudaMemcpyDeviceToHost);
+            cudaMemcpy(ret.data_smart.get(), data_smart.get(), size(), cudaMemcpyDeviceToHost);
         } else {
-            assert("not implemented");
+            throw std::runtime_error("Unsupported device transfer combination");
         }
+
+        cudaDeviceSynchronize();
+        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
         return ret;
     }
 
@@ -219,39 +211,60 @@ struct Tensor
     void operator=(const Tensor<T> &) = delete;
     void operator=(Tensor<T> &&another)
     {
-        clear();
         assert(device == another.device);
-        data = another.data;
-        shape = std::move(another.shape);
-        assert(shape.size() != 0);
-        another.data = NULL;
-        another.shape = Shape({0});
+        data_smart = another.data_smart;
+        shape_ = std::move(another.shape_);
+        assert(shape_.size() != 0);
+        another.data_smart = NULL;
+        another.shape_ = Shape({0});
     }
 
     void clear()
     {
-        if (data && numel() != 0) {
+        if (data_smart && numel() != 0) {
+            std::cout << "really clear(), device = " << (device == Device::GPU ? "GPU" : "CPU")
+                      << std::endl;
             switch (device) {
                 case Device::CPU: {
-                    free(data);
+                    free(data_smart);
                     break;
                 }
                 case Device::GPU: {
-                    cudaFree(data);
+                    cudaFree(data_smart);
+                    cudaDeviceSynchronize();
                     break;
                 }
                 default:
                     assert("not implemented");
             }
         }
-        data = NULL;
-        shape = Shape({0});
+        data_smart = NULL;
+        shape_ = Shape({0});
     }
 
     explicit operator bool() const
     {
-        return bool(data);
+        return bool(data_smart);
     }
+
+    const Shape &shape() const
+    {
+        return shape_;
+    }
+
+    T *data() const
+    {
+        return data_smart.get();
+    }
+
+private:
+    Tensor(std::shared_ptr<T> data_smart, Shape shape_, Device device = Device::CPU)
+        : data_smart(data_smart), shape_(std::move(shape_)), device(device)
+    {
+    }
+
+    Shape shape_;
+    std::shared_ptr<T> data_smart;
 };
 
 using FloatTensor = Tensor<float>;
