@@ -110,9 +110,8 @@ public:
 
     static Linear loadWeightToCuda(std::string name, uint64_t in_features, uint64_t out_features)
     {
-        assert (1 == 2);
         auto weight = FloatTensor::loadToCuda("weights_bin/" + name + ".weight")
-                          .reshape(Shape({in_features, out_features}));
+                          .reshape(Shape({out_features, in_features}));
         // std::cout << "load " << "weights_bin/" + name + ".weight" << "\n";
         auto bias =
             FloatTensor::loadToCuda("weights_bin/" + name + ".bias").reshape(Shape({out_features}));

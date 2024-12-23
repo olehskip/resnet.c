@@ -130,36 +130,6 @@ void layerForward(Layer &layer, FloatTensor &x)
 {
     const uint64_t B = x.shape.at(0);
     FloatTensor *y = &x;
-    auto convForward = [](Conv2d &conv, FloatTensor &x, FloatTensor &act_out) {
-        const auto [B, C, H, W] = x.shape.as_tuple<4>();
-        const Shape conv_out_shape = conv.getOutShape(x.shape);
-        const auto [h, w, conv_h_out, conv_w_out] = conv_out_shape.as_tuple<4>();
-        if (!act_out) {
-            act_out = FloatTensor(conv_out_shape, Device::GPU);
-        }
-
-        const auto conv_block_size = dim3(8, 8, 16);
-        const auto conv_blocks =
-            dim3(CEIL(B * conv_h_out, conv_block_size.x), CEIL(conv_w_out, conv_block_size.y),
-                 CEIL(conv.out_channels, conv_block_size.z));
-        conv2dForwardKernel<<<conv_blocks, conv_block_size>>>(
-            x.data, act_out.data, conv.weight.data, conv.kernel_size, conv.stride, conv.padding,
-            conv_h_out, conv_w_out, B, conv.in_channels, conv.out_channels, H, W);
-        cudaDeviceSynchronize();
-        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
-    };
-    auto bnForward = [](BatchNorm2d &bn, FloatTensor &x) {
-        const auto [B, C, conv_w_out, conv_h_out] = x.shape.as_tuple<4>();
-        const auto bn_block_size = dim3(8, 8, 16);
-        const auto bn_blocks =
-            dim3(CEIL(B, bn_block_size.x), CEIL(bn.channels_num, bn_block_size.y),
-                 CEIL(conv_w_out * conv_h_out, bn_block_size.z));
-        batchNorm2dForwardKernel<<<bn_blocks, bn_block_size>>>(
-            x.data, x.data, bn.weight.data, bn.bias.data, bn.mean.data, bn.var.data, B,
-            bn.channels_num, conv_w_out * conv_h_out);
-        cudaDeviceSynchronize();
-        gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
-    };
     auto reluForward = [](FloatTensor &x) {
         const auto relu_block_size = dim3(1024);
         const auto relu_blocks = dim3(CEIL(x.numel(), relu_block_size.x));
@@ -170,21 +140,21 @@ void layerForward(Layer &layer, FloatTensor &x)
     for (auto &block : layer.blocks) {
         std::cout << "\nnew block" << std::endl;
         if (block.downsample) {
-            convForward(block.downsample->conv, *y, block.downsample->act);
-            bnForward(block.downsample->bn, block.downsample->act);
+            block.downsample->conv.forward(*y, block.downsample->act);
+            block.downsample->bn.forward(block.downsample->act, block.downsample->act);
             std::cout << "downsample" << std::endl;
         }
 
-        convForward(block.conv1, *y, block.act1_out);
-        bnForward(block.bn1, block.act1_out);
+        block.conv1.forward(*y, block.act1_out);
+        block.bn1.forward(block.act1_out, block.act1_out);
         reluForward(block.act1_out);
 
-        convForward(block.conv2, block.act1_out, block.act2_out);
-        bnForward(block.bn2, block.act2_out);
+        block.conv1.forward(block.act1_out, block.act2_out);
+        block.bn2.forward(block.act1_out, block.act2_out);
         reluForward(block.act2_out);
 
-        convForward(block.conv3, block.act2_out, block.act3_out);
-        bnForward(block.bn3, block.act3_out);
+        block.conv3.forward(block.act2_out, block.act3_out);
+        block.bn3.forward(block.act3_out, block.act3_out);
         const auto add_block_size = dim3(1024);
         const auto add_blocks = dim3(CEIL(block.act3_out.numel(), add_block_size.x));
         // assert(block.act1_out.shape == block.downsample->act.shape);
@@ -210,32 +180,10 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
         model.act1_out = FloatTensor(conv1_out_shape, Device::GPU);
     }
     std::cout << "model.act1_out.shape = " << model.act1_out.shape << std::endl;
-
-    const auto conv1_block_size = dim3(8, 8, 16);
-    const auto conv1_blocks =
-        dim3(CEIL(B * conv1_h_out, conv1_block_size.x), CEIL(conv1_w_out, conv1_block_size.y),
-             CEIL(model.conv1.out_channels, conv1_block_size.z));
-    conv2dForwardKernel<<<conv1_blocks, conv1_block_size>>>(
-        x.data, model.act1_out.data, model.conv1.weight.data, model.conv1.kernel_size,
-        model.conv1.stride, model.conv1.padding, conv1_h_out, conv1_w_out, B,
-        model.conv1.in_channels, model.conv1.out_channels, H, W);
-    cudaDeviceSynchronize();
-    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    model.conv1.forward(x, model.act1_out);
     std::cout << "conv1 kernel done\n";
-    FloatTensor out = x.cpu();
-    out.save("cuda_out.bin");
-    std::cout << "Saved output with shape = " << out.shape << std::endl;
-
-    const auto bn1_block_size = dim3(8, 8, 16);
-    const auto bn1_blocks =
-        dim3(CEIL(B, bn1_block_size.x), CEIL(model.bn1.channels_num, bn1_block_size.y),
-             CEIL(conv1_w_out * conv1_h_out, bn1_block_size.z));
-    batchNorm2dForwardKernel<<<bn1_blocks, bn1_block_size>>>(
-        model.act1_out.data, model.act1_out.data, model.bn1.weight.data, model.bn1.bias.data,
-        model.bn1.mean.data, model.bn1.var.data, B, model.bn1.channels_num,
-        conv1_w_out * conv1_h_out);
-    cudaDeviceSynchronize();
-    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    
+    model.bn1.forward(model.act1_out, model.act1_out);
     std::cout << "bn1 kernel done\n";
 
     const auto relu_block_size = dim3(1024);
@@ -252,25 +200,12 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
         model.maxpool_out = FloatTensor(maxpool_out_shape, Device::GPU);
     }
     std::cout << "model.maxpool_out.shape = " << model.maxpool_out.shape << std::endl;
-
-    const auto maxpool_h_out = maxpool_out_shape.at(2), maxpool_w_out = maxpool_out_shape.at(3);
-    const auto maxpool_block_size = dim3(8, 8, 16);
-    const auto maxpool_blocks =
-        dim3(CEIL(B * conv1_w_out, maxpool_block_size.x), CEIL(conv1_h_out, maxpool_block_size.y),
-             CEIL(model.bn1.channels_num, maxpool_block_size.z));
-    maxPool2dKernel<<<maxpool_blocks, maxpool_block_size>>>(
-        model.act1_out.data, model.maxpool_out.data, model.maxpool.kernel_size,
-        model.maxpool.stride, model.maxpool.padding, maxpool_h_out, maxpool_w_out, B,
-        model.bn1.channels_num, conv1_w_out, conv1_h_out);
-    cudaDeviceSynchronize();
-    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    model.maxpool.maxforward(model.act1_out, model.maxpool_out);
     std::cout << "maxpool kernel done\n";
 
     layerForward(model.layer1, model.maxpool_out);
     std::cout << "layer1 finished\n";
-    
-
-/* 
+     
     layerForward(model.layer2, model.layer1.blocks.back().act3_out);
     std::cout << "layer2 finished\n";
     layerForward(model.layer3, model.layer2.blocks.back().act3_out);
@@ -286,18 +221,7 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
         model.avgpool_out = FloatTensor(avgpool_out_shape, Device::GPU);
     }
     std::cout << "model.avgpool_out.shape = " << model.avgpool_out.shape << std::endl;
-    const auto avgpool_h_out = avgpool_out_shape.at(2), avgpool_w_out = avgpool_out_shape.at(3);
-    const auto avgpool_block_size = dim3(8, 8, 16);
-    const auto avgpool_blocks =
-        dim3(CEIL(last_layer_out.shape.at(0) * last_layer_out.shape.at(1), avgpool_block_size.x),
-             CEIL(last_layer_out.shape.at(2), avgpool_block_size.y),
-             CEIL(last_layer_out.shape.at(3), avgpool_block_size.z));
-    avgPool2dKernel<<<avgpool_blocks, avgpool_block_size>>>(
-        last_layer_out.data, model.avgpool_out.data, model.avgpool.kernel_size,
-        model.avgpool.stride, model.avgpool.padding, avgpool_h_out, avgpool_w_out, B,
-        last_layer_out.shape.at(1), last_layer_out.shape.at(2), last_layer_out.shape.at(3));
-    cudaDeviceSynchronize();
-    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
+    model.avgpool.avgforward(last_layer_out, model.avgpool_out);
     std::cout << "avgpool kernel done\n";
 
 
@@ -309,20 +233,12 @@ void resnet152Forward(ResnetModel &model, FloatTensor &x)
         model.fc_out = FloatTensor(Shape({avgpool_out_flatten.shape.at(0), model.fc.out_features}),
                                    Device::GPU);
     }
-    const auto linear_block_size = dim3(16, 16);
-    const auto linear_blocks = dim3(CEIL(avgpool_out_flatten.shape.at(0), linear_block_size.x),
-                                    CEIL(avgpool_out_flatten.shape.at(1), linear_block_size.y));
-    linearForwardKernel<<<linear_blocks, linear_block_size>>>(
-        avgpool_out_flatten.data, model.fc_out.data, model.fc.weight.data, model.fc.bias.data,
-        model.fc.in_features, avgpool_out_flatten.shape.at(0), model.fc.out_features);
-    cudaDeviceSynchronize();
-    gpuAssert(cudaGetLastError(), __FILE__, __LINE__);
-    std::cout << "Finished kernel\n";
-    */
+    model.fc.forward(avgpool_out_flatten, model.fc_out);
+    std::cout << "Finished\n";
 
-    // FloatTensor out = model.avgpool_out.cpu();
-    // out.save("cuda_out.bin");
-    // std::cout << "Saved output with shape = " << out.shape << std::endl;
+    FloatTensor out = model.fc_out.cpu();
+    out.save("cuda_out.bin");
+    std::cout << "Saved output with shape = " << out.shape << std::endl;
 }
 
 int main()
