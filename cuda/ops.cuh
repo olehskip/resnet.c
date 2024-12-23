@@ -22,11 +22,8 @@ __global__ void maxPool2dKernel(float *inp, float *out, uint64_t kernel_size, ui
 __global__ void avgPool2dKernel(float *inp, float *out, uint64_t kernel_size, uint64_t stride,
                                 uint64_t padding, uint64_t h_out, uint64_t w_out, uint64_t B,
                                 uint64_t channels, uint64_t H, uint64_t W);
-// (B, C) x (C, N) = (B, N)
-// N - number of neurons, C - number of features
-// adds bias if it's not NULL
-__global__ void linearForwardKernel(float *inp, float *out, float *weight, float *bias, uint64_t N,
-                                    uint64_t B, uint64_t C);
+__global__ void linearForwardKernel(float *inp, float *out, float *weight, float *bias, uint64_t B,
+                                    uint64_t in_features, uint64_t out_features);
 __global__ void reluForwardKernel(float *inp, float *out, uint64_t N);
 
 __global__ void batchNorm2dForwardKernel(float *inp, float *out, float *weight, float *bias,
