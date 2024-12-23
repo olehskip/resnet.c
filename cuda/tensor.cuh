@@ -115,7 +115,7 @@ struct Tensor
     {
         Tensor<T> tensor(shape, Device::CPU);
         const uint64_t end = shape.numel();
-        for(uint64_t i = 0; i <= end; ++i) {
+        for(uint64_t i = 0; i < end; ++i) {
             tensor.data[i] = i;
         }
 
@@ -126,7 +126,7 @@ struct Tensor
     {
         Tensor<T> tensor(shape, Device::CPU);
         const uint64_t end = shape.numel();
-        for(uint64_t i = 0; i <= end; ++i) {
+        for(uint64_t i = 0; i < end; ++i) {
             tensor.data[i] = 1;
         }
 
