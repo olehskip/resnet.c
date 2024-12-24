@@ -5,6 +5,11 @@ import torchvision
 import struct
 from pathlib import Path
 
+def check_out(y, name="cuda_out.bin"):
+    my_y = load_tensor(name).view(y.shape)
+    print(f"y Equal with {name}: {torch.allclose(y, my_y, atol=1e-2, rtol=0.1)}")
+    breakpoint()
+
 DEVICE = "cuda"
 
 def load_tensor(file_path):
@@ -135,7 +140,7 @@ class Resnet152(nn.Module):
 
         y = self.maxpool(y)
         assert y.shape[-2:] == (56,) * 2
-
+        
         y = self.layer1(y)
         assert y.shape[-2:] == (56,) * 2
 
@@ -156,14 +161,12 @@ class Resnet152(nn.Module):
 
         return y
 
-B = 2
 C = 3
 H, W = 224, 224
-a = torch.arange(B * C * H * W).view(B, C, H, W).float().to(DEVICE)
-# a = torch.rand((16, 3, 224, 224)).to(DEVICE)
+x = load_tensor("test_bins/ILSVRC2012_val_00004749.bin").view(1, C, H, W)
 resnet = Resnet152(1000).to(DEVICE)
 resnet2 = torchvision.models.resnet152(weights="IMAGENET1K_V1").to(DEVICE)
 resnet.load_state_dict(resnet2.state_dict())
-c = resnet2(a)
-b = resnet(a)
-print(torch.equal(b, c))
+resnet.eval()
+y = resnet(x)
+print(y.argmax(1))
